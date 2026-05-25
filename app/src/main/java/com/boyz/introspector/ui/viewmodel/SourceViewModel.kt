@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.boyz.introspector.data.repository.ClassInfo
+import com.boyz.introspector.data.repository.OccurrenceResult
 import com.boyz.introspector.data.repository.ResourceCategory
 import com.boyz.introspector.data.repository.ResourceInfo
 import com.boyz.introspector.data.repository.SourceRepository
@@ -15,6 +16,17 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import java.io.File
+
+// ── Find-all overlay state ─────────────────────────────────────────────────────
+
+data class FindAllState(
+    val query: String,
+    val results: List<OccurrenceResult>,
+    val isLoading: Boolean,
+    val filter: String = ""
+)
+
+// ── Main UI state ──────────────────────────────────────────────────────────────
 
 sealed interface SourceUiState {
     data object Idle : SourceUiState
@@ -109,6 +121,28 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     fun expandDrawerPath(keys: Set<String>) {
         if (keys.isEmpty()) return
         drawerExpanded = drawerExpanded + keys
+    }
+
+    // ── Find-all occurrences overlay ───────────────────────────────────────────
+
+    var findAllState: FindAllState? by mutableStateOf(null)
+        private set
+
+    fun findAllOccurrences(word: String) {
+        val classList = currentClassList() ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            findAllState = FindAllState(word, emptyList(), isLoading = true)
+            val results  = repo.findAllOccurrences(word, classList)
+            findAllState = FindAllState(word, results, isLoading = false)
+        }
+    }
+
+    fun filterFindAll(filter: String) {
+        findAllState = findAllState?.copy(filter = filter)
+    }
+
+    fun dismissFindAll() {
+        findAllState = null
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
@@ -215,64 +249,40 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
 
     // ── In-code search ─────────────────────────────────────────────────────────
 
-    fun search(query: String) {
-        when (val state = _uiState.value) {
-            is SourceUiState.ViewingClass -> {
-                if (query.isBlank()) {
-                    _uiState.value = state.copy(searchQuery = "", matchLines = emptyList(), currentMatch = -1)
-                    return
-                }
-                val lines = state.code.lines()
-                val hits  = lines.indices.filter { lines[it].contains(query, ignoreCase = true) }
-                _uiState.value = state.copy(
-                    searchQuery  = query,
-                    matchLines   = hits,
-                    currentMatch = if (hits.isEmpty()) -1 else 0
-                )
-            }
-            is SourceUiState.ViewingResource -> {
-                if (query.isBlank()) {
-                    _uiState.value = state.copy(searchQuery = "", matchLines = emptyList(), currentMatch = -1)
-                    return
-                }
-                val lines = state.content.lines()
-                val hits  = lines.indices.filter { lines[it].contains(query, ignoreCase = true) }
-                _uiState.value = state.copy(
-                    searchQuery  = query,
-                    matchLines   = hits,
-                    currentMatch = if (hits.isEmpty()) -1 else 0
-                )
-            }
-            else -> return
+    fun search(query: String)  { _uiState.value = _uiState.value.withSearch(query) }
+    fun nextMatch()             { _uiState.value = _uiState.value.withNextMatch()   }
+    fun prevMatch()             { _uiState.value = _uiState.value.withPrevMatch()   }
+
+    private fun SourceUiState.withSearch(query: String): SourceUiState {
+        val text = when (this) {
+            is SourceUiState.ViewingClass    -> code
+            is SourceUiState.ViewingResource -> content
+            else -> return this
+        }
+        if (query.isBlank()) return when (this) {
+            is SourceUiState.ViewingClass    -> copy(searchQuery = "", matchLines = emptyList(), currentMatch = -1)
+            is SourceUiState.ViewingResource -> copy(searchQuery = "", matchLines = emptyList(), currentMatch = -1)
+            else -> this
+        }
+        val lines = text.lines()
+        val hits  = lines.indices.filter { lines[it].contains(query, ignoreCase = true) }
+        return when (this) {
+            is SourceUiState.ViewingClass    -> copy(searchQuery = query, matchLines = hits, currentMatch = if (hits.isEmpty()) -1 else 0)
+            is SourceUiState.ViewingResource -> copy(searchQuery = query, matchLines = hits, currentMatch = if (hits.isEmpty()) -1 else 0)
+            else -> this
         }
     }
 
-    fun nextMatch() {
-        when (val s = _uiState.value) {
-            is SourceUiState.ViewingClass -> {
-                if (s.matchLines.isEmpty()) return
-                _uiState.value = s.copy(currentMatch = (s.currentMatch + 1) % s.matchLines.size)
-            }
-            is SourceUiState.ViewingResource -> {
-                if (s.matchLines.isEmpty()) return
-                _uiState.value = s.copy(currentMatch = (s.currentMatch + 1) % s.matchLines.size)
-            }
-            else -> return
-        }
+    private fun SourceUiState.withNextMatch(): SourceUiState = when (this) {
+        is SourceUiState.ViewingClass    -> if (matchLines.isEmpty()) this else copy(currentMatch = (currentMatch + 1) % matchLines.size)
+        is SourceUiState.ViewingResource -> if (matchLines.isEmpty()) this else copy(currentMatch = (currentMatch + 1) % matchLines.size)
+        else -> this
     }
 
-    fun prevMatch() {
-        when (val s = _uiState.value) {
-            is SourceUiState.ViewingClass -> {
-                if (s.matchLines.isEmpty()) return
-                _uiState.value = s.copy(currentMatch = (s.currentMatch - 1 + s.matchLines.size) % s.matchLines.size)
-            }
-            is SourceUiState.ViewingResource -> {
-                if (s.matchLines.isEmpty()) return
-                _uiState.value = s.copy(currentMatch = (s.currentMatch - 1 + s.matchLines.size) % s.matchLines.size)
-            }
-            else -> return
-        }
+    private fun SourceUiState.withPrevMatch(): SourceUiState = when (this) {
+        is SourceUiState.ViewingClass    -> if (matchLines.isEmpty()) this else copy(currentMatch = (currentMatch - 1 + matchLines.size) % matchLines.size)
+        is SourceUiState.ViewingResource -> if (matchLines.isEmpty()) this else copy(currentMatch = (currentMatch - 1 + matchLines.size) % matchLines.size)
+        else -> this
     }
 
     override fun onCleared() {

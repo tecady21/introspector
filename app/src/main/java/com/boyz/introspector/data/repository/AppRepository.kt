@@ -45,14 +45,6 @@ class AppRepository(private val context: Context) {
         }
     }
 
-    fun getSourceDir(packageName: String): String {
-        return try {
-            context.packageManager.getApplicationInfo(packageName, 0).sourceDir
-        } catch (e: PackageManager.NameNotFoundException) {
-            ""
-        }
-    }
-
     /** Returns the base APK plus any split APKs for the given package. */
     fun getSourceFiles(packageName: String): List<File> {
         return try {

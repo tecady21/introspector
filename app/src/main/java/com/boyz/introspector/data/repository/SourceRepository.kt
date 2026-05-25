@@ -36,6 +36,16 @@ data class ClassInfo(
     val packageName: String
 )
 
+// ── Cross-file search result ───────────────────────────────────────────────────
+
+data class OccurrenceResult(
+    val displayName: String,      // "Foo" for classes, "AndroidManifest.xml" for resources
+    val lineNumber: Int,          // 1-based
+    val lineText: String,         // trimmed snippet of the matching line
+    val classInfo: ClassInfo?,    // non-null → navigate to class
+    val resourceInfo: ResourceInfo? // non-null → navigate to resource
+)
+
 // ── Repository ─────────────────────────────────────────────────────────────────
 
 /**
@@ -57,6 +67,10 @@ data class ClassInfo(
  *  - If neither → full first-run path
  */
 class SourceRepository(private val app: Application) {
+
+    companion object {
+        private const val MAX_RESULTS = 2000
+    }
 
     private val cacheDir: File get() = app.cacheDir
 
@@ -108,7 +122,9 @@ class SourceRepository(private val app: Application) {
                         val entries = zf.entries()
                         while (entries.hasMoreElements()) {
                             val e = entries.nextElement()
-                            if (!e.isDirectory && isDisplayable(e.name)) {
+                            // Guard: skip paths already seen (split APKs each carry their own
+                            // AndroidManifest.xml; only the base APK's copy is meaningful).
+                            if (!e.isDirectory && isDisplayable(e.name) && !entryMap.containsKey(e.name)) {
                                 entryMap[e.name] = ResEntry(idx, e.name)
                                 infoList += ResourceInfo(
                                     name     = e.name.substringAfterLast('/'),
@@ -139,7 +155,9 @@ class SourceRepository(private val app: Application) {
                                     out.outputStream().buffered().use { zip.copyTo(it) }
                                     extracted += out
                                 }
-                                isDisplayable(e.name) -> {
+                                // Guard: skip paths already seen (split APKs each carry
+                                // their own AndroidManifest.xml; only base APK's copy counts).
+                                isDisplayable(e.name) && !entryMap.containsKey(e.name) -> {
                                     entryMap[e.name] = ResEntry(idx, e.name)
                                     infoList += ResourceInfo(
                                         name     = e.name.substringAfterLast('/'),
@@ -163,7 +181,7 @@ class SourceRepository(private val app: Application) {
 
         // ── Parse class names from DEX headers (instant, no JADX) ────────────
         onProgress?.invoke("Parsing ${dexFiles.size} DEX file(s)…")
-        val fastClasses = dexFiles.flatMap { parseDexClassNames(it) }.sortedBy { it.fullName }
+        val fastClasses = dexFiles.flatMap { DexParser.parseClassInfos(it) }.sortedBy { it.fullName }
 
         // ── Start service or skip if cache is complete ────────────────────────
         if (cacheComplete) {
@@ -326,6 +344,49 @@ class SourceRepository(private val app: Application) {
         }
     }
 
+    // ── Cross-file occurrence search ───────────────────────────────────────────
+
+    /**
+     * Searches every cached decompiled `.java` class file and every decoded
+     * XML `.decoded` file for lines containing [query] (case-insensitive).
+     *
+     * Must be called on an IO thread. Results are capped at [MAX_RESULTS].
+     */
+    fun findAllOccurrences(query: String, classList: List<ClassInfo>): List<OccurrenceResult> {
+        val dCache = decompileCache ?: return emptyList()
+        if (query.isBlank()) return emptyList()
+        val lower   = query.lowercase()
+        val results = mutableListOf<OccurrenceResult>()
+
+        // Search decompiled class files
+        for (cls in classList) {
+            val file = classFile(dCache, cls.fullName)
+            if (!file.exists()) continue
+            try {
+                file.readLines().forEachIndexed { idx, line ->
+                    if (line.lowercase().contains(lower))
+                        results += OccurrenceResult(cls.simpleName, idx + 1, line.trim(), cls, null)
+                }
+            } catch (_: Exception) { }
+            if (results.size >= MAX_RESULTS) return results
+        }
+
+        // Search decoded XML resource files
+        for (res in allResources) {
+            val file = xmlCacheFile(dCache, res.apkPath)
+            if (!file.exists()) continue
+            try {
+                file.readLines().forEachIndexed { idx, line ->
+                    if (line.lowercase().contains(lower))
+                        results += OccurrenceResult(res.name, idx + 1, line.trim(), null, res)
+                }
+            } catch (_: Exception) { }
+            if (results.size >= MAX_RESULTS) return results
+        }
+
+        return results
+    }
+
     // ── Lifecycle ──────────────────────────────────────────────────────────────
 
     fun close() {
@@ -378,62 +439,6 @@ class SourceRepository(private val app: Application) {
         var h = 1125899906842597L
         for (f in sourceFiles) { h = h * 31 + f.length(); h = h * 31 + f.lastModified() }
         return java.lang.Long.toUnsignedString(h, 16)
-    }
-
-    // ── DEX header parser (instant, no JADX) ──────────────────────────────────
-
-    private fun parseDexClassNames(dexFile: File): List<ClassInfo> =
-        try { parseDexBytes(dexFile.readBytes()) } catch (_: Exception) { emptyList() }
-
-    private fun parseDexBytes(b: ByteArray): List<ClassInfo> {
-        if (b.size < 112) return emptyList()
-        if (b[0] != 0x64.toByte() || b[1] != 0x65.toByte() ||
-            b[2] != 0x78.toByte() || b[3] != 0x0A.toByte()) return emptyList()
-
-        fun i32(off: Int) =
-            (b[off].toInt() and 0xFF) or
-            ((b[off + 1].toInt() and 0xFF) shl 8) or
-            ((b[off + 2].toInt() and 0xFF) shl 16) or
-            ((b[off + 3].toInt() and 0xFF) shl 24)
-
-        val strIdsOff    = i32(0x3C)
-        val typeIdsSize  = i32(0x40)
-        val typeIdsOff   = i32(0x44)
-        val classDefsN   = i32(0x5C)
-        val classDefsOff = i32(0x60)
-
-        if (classDefsN <= 0) return emptyList()
-        if (classDefsOff.toLong() + classDefsN.toLong() * 32 > b.size) return emptyList()
-        if (typeIdsOff.toLong()   + typeIdsSize.toLong()  * 4 > b.size) return emptyList()
-
-        val result = ArrayList<ClassInfo>(classDefsN)
-        for (i in 0 until classDefsN) {
-            val defOff     = classDefsOff + i * 32
-            val classIdx   = i32(defOff)
-            if (classIdx >= typeIdsSize) continue
-            val strIdx     = i32(typeIdsOff + classIdx * 4)
-            val strDataOff = i32(strIdsOff  + strIdx   * 4)
-            if (strDataOff <= 0 || strDataOff >= b.size) continue
-
-            var pos = strDataOff; var len = 0; var shift = 0
-            while (pos < b.size && shift <= 28) {
-                val byte = b[pos++].toInt() and 0xFF
-                len = len or ((byte and 0x7F) shl shift)
-                if (byte and 0x80 == 0) break
-                shift += 7
-            }
-            if (len < 2 || pos + len > b.size) continue
-            if (b[pos] != 0x4C.toByte() || b[pos + len - 1] != 0x3B.toByte()) continue
-
-            val fullName = String(b, pos + 1, len - 2, Charsets.UTF_8).replace('/', '.')
-            val dot = fullName.lastIndexOf('.')
-            result += ClassInfo(
-                fullName    = fullName,
-                simpleName  = if (dot >= 0) fullName.substring(dot + 1) else fullName,
-                packageName = if (dot >= 0) fullName.substring(0, dot)  else "(default)"
-            )
-        }
-        return result
     }
 
     // ── ZIP helpers ────────────────────────────────────────────────────────────
