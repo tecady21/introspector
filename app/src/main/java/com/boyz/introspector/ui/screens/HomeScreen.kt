@@ -10,6 +10,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Android
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -34,8 +35,10 @@ fun HomeScreen(
     vm: AppViewModel = viewModel()
 ) {
     val apps by vm.apps.collectAsStateWithLifecycle()
-    val isRooted by vm.isRooted.collectAsStateWithLifecycle()
+    val showAllApps by vm.showAllApps.collectAsStateWithLifecycle()
+    val isRooted by session.isRooted.collectAsStateWithLifecycle()
     val attachedSession by session.session.collectAsStateWithLifecycle()
+    var menuExpanded by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -52,19 +55,43 @@ fun HomeScreen(
                         }
                         Spacer(Modifier.width(8.dp))
                     }
-                    Badge(
-                        containerColor = if (isRooted)
-                            MaterialTheme.colorScheme.primary
-                        else
-                            MaterialTheme.colorScheme.error
-                    ) {
-                        Text(
-                            text = if (isRooted) "ROOTED" else "NO ROOT",
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                            style = MaterialTheme.typography.labelSmall
-                        )
+                    // Root badge — only shown after a root check has been attempted
+                    isRooted?.let { rooted ->
+                        Badge(
+                            containerColor = if (rooted)
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.error
+                        ) {
+                            Text(
+                                text = if (rooted) "ROOTED" else "NO ROOT",
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                        Spacer(Modifier.width(8.dp))
                     }
-                    Spacer(Modifier.width(12.dp))
+                    // ⋮ overflow menu
+                    Box {
+                        IconButton(onClick = { menuExpanded = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "More options")
+                        }
+                        DropdownMenu(
+                            expanded = menuExpanded,
+                            onDismissRequest = { menuExpanded = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Show all apps") },
+                                onClick = { vm.toggleShowAllApps(); menuExpanded = false },
+                                leadingIcon = {
+                                    Checkbox(
+                                        checked = showAllApps,
+                                        onCheckedChange = null
+                                    )
+                                }
+                            )
+                        }
+                    }
                 }
             )
         }

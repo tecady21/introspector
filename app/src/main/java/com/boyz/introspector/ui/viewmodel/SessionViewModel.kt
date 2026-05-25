@@ -30,6 +30,10 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     private val _scanState = MutableStateFlow<ScanState>(ScanState.Idle)
     val scanState: StateFlow<ScanState> = _scanState
 
+    /** null = not yet checked; true = root confirmed; false = root denied/unavailable */
+    private val _isRooted = MutableStateFlow<Boolean?>(null)
+    val isRooted: StateFlow<Boolean?> = _isRooted
+
     fun attach(packageName: String) {
         // Same app already attached — keep all existing scan rounds, just refresh PID.
         val alreadyAttached = _session.value?.packageName == packageName
@@ -39,7 +43,14 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
 
         viewModelScope.launch(Dispatchers.IO) {
             _scanState.value = ScanState.Attaching
-            repo.installBinary()
+            try {
+                repo.installBinary()
+                _isRooted.value = true
+            } catch (e: Exception) {
+                _isRooted.value = false
+                _scanState.value = ScanState.Error("Root access required for memory features")
+                return@launch
+            }
 
             val appName = try {
                 getApplication<Application>().packageManager

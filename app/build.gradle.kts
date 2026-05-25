@@ -13,7 +13,9 @@ android {
 
     defaultConfig {
         applicationId = "com.boyz.introspector"
-        minSdk = 33
+        // jadx-zip (transitive dep of jadx-core 1.5.x) calls Inflater.setInput(ByteBuffer),
+        // which was added to Android in API 34. API 33 throws NoSuchMethodError at runtime.
+        minSdk = 34
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
@@ -48,7 +50,12 @@ android {
                 "META-INF/NOTICE*",
                 "about.html",
                 "plugin.xml",
-                "*.txt"
+                "*.txt",
+                // Guava (pulled in by jadx-dex-input) ships duplicate files across jre/android variants
+                "META-INF/proguard/*",
+                "win32-x86/**",
+                "win32-x86-64/**",
+                "META-INF/versions/**"
             )
         }
     }
@@ -75,6 +82,11 @@ dependencies {
     implementation(libs.libsu.core)
     implementation(libs.androidx.compose.material.icons.extended)
     implementation(libs.jadx.core) {
+        exclude(group = "ch.qos.logback")
+    }
+    // DEX input plugin — provides the actual DEX file reader that jadx-core uses via ServiceLoader.
+    // Without this, JADX only has a minimal built-in reader that misses most DEX classes.
+    implementation(libs.jadx.dex.input) {
         exclude(group = "ch.qos.logback")
     }
     implementation(libs.slf4j.nop)

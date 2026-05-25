@@ -13,7 +13,17 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
+        android:largeHeap="true"
         android:theme="@style/Theme.Introspector">
+        <!--
+             android:process=":decompiler" gives this service its own OS process
+             and its own heap.  If JADX OOMs here the UI process is unaffected.
+        -->
+        <service
+            android:name=".DecompilerService"
+            android:exported="false"
+            android:process=":decompiler" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
